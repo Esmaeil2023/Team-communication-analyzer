@@ -1,0 +1,13 @@
+{
+  "id": "esmaeilmolapour94/team-communication-analyzer",
+  "title": "Team Communication Analyzer",
+  "code_file": "team_communication_analyzer.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": false,
+  "enable_gpu": false,
+  "enable_internet": true,
+  "dataset_sources": ["kaggle/reddit-comments-may-2015"],
+  "competition_sources": [],
+  "kernel_sources": []
+}

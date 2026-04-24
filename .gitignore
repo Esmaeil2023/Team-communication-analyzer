@@ -1,0 +1,8 @@
+database.sqlite
+*.sqlite
+*.db
+__pycache__/
+.DS_Store
+*.pyc
+.idea/
+SNA/
