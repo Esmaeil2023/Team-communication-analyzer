@@ -1,19 +1,26 @@
 """
 train_and_predict.py
 ────────────────────
-Hybrid COIN Archetype Classifier — Fixed for cross-platform scale mismatch
+Hybrid COIN Archetype Classifier — Multi-Dataset Training
 
-The core problem: Slack has power users with 2000+ messages. Your WhatsApp
-team has max 197. Raw feature values make everyone look like a low-activity
-Slack user (→ Ant).
+Training data (combined):
+  1. Slack Developer Chats (Chatterjee et al., MSR 2020)
+     — 60,000 messages · 1,639 software engineers
+     — Python, Clojure, Elm, Racket communities
 
-Fix: Convert ALL features to RANK-PERCENTILE (0–1) within each dataset
-BEFORE training and prediction. This removes absolute scale differences.
-The model learns "are you a high-replier relative to your group?" not
-"do you have 200+ messages?"
+  2. Nankani 2020 — CODERS WhatsApp Group (TSEC Mumbai)
+     — ~20,000 messages · real CS/IT students
+     — Discussing coding, GCP, GitHub, web development, hackathons
 
-Additionally: hybrid voting gives rule-based classifier equal weight for
-small groups (< 20 people), where ML confidence is naturally lower.
+Test / Demo data:
+  — Your team's WhatsApp group (5 members, 324 messages)
+
+Method:
+  — Rank-normalize features within each dataset (fixes scale mismatch)
+  — Rule-based COIN labels → pseudo ground truth
+  — Random Forest (300 trees, balanced classes)
+  — 5-fold cross-validation
+  — Hybrid vote: 50% ML + 50% rules for final prediction
 """
 
 import pandas as pd
@@ -66,14 +73,16 @@ def extract_features(json_path, label="dataset"):
     task_words = ['done', 'finished', 'completed', 'sent', 'here', 'attached',
                   'will do', 'ok', 'okay', 'sure', 'deadline', 'file', 'link',
                   'submitted', 'ready', 'push', 'commit', 'fixed', 'update',
-                  'works', 'working', 'solved', 'merged', 'deployed', 'closed']
+                  'works', 'working', 'solved', 'merged', 'deployed', 'closed',
+                  'kiya', 'ho gaya', 'kar diya']   # Hindi task words from Nankani
     df['task_score'] = df['body'].str.lower().apply(
         lambda x: sum(w in x for w in task_words))
     avg_task = df.groupby('author')['task_score'].mean().rename('task_focus_score')
 
     butterfly_words = ['so basically', 'in summary', 'to summarize', 'in other words',
                        'what i mean', 'let me explain', 'to clarify', 'in short',
-                       'the idea is', 'essentially', 'in a nutshell', 'meaning that']
+                       'the idea is', 'essentially', 'in a nutshell', 'meaning that',
+                       'if you want', 'you can', 'you should', 'i suggest', 'try this']
     df['bfly_score'] = df['body'].str.lower().apply(
         lambda x: sum(w in x for w in butterfly_words))
     avg_butterfly = df.groupby('author')['bfly_score'].mean().rename('butterfly_score')
@@ -93,7 +102,8 @@ def extract_features(json_path, label="dataset"):
     capybara_words = ['great', 'well done', 'good job', 'thanks', 'thank you',
                       'appreciate', 'agree', 'exactly', 'love', 'perfect',
                       'awesome', 'nice', 'good point', 'helpful', 'support',
-                      'welcome', 'brilliant', 'excellent', 'congrats']
+                      'welcome', 'brilliant', 'excellent', 'congrats', 'anytime',
+                      'thanks alot', 'thanks a lot', 'relax', 'no problem', 'sure']
     df['cap_score'] = df['body'].str.lower().apply(
         lambda x: sum(w in x for w in capybara_words))
     avg_capybara = df.groupby('author')['cap_score'].mean().rename('capybara_score')
@@ -115,21 +125,21 @@ def extract_features(json_path, label="dataset"):
 
 
 # ════════════════════════════════════════════════════════════════════════
-# RANK-PERCENTILE NORMALIZATION  ← THE KEY FIX
+# RANK-PERCENTILE NORMALIZATION
 # ════════════════════════════════════════════════════════════════════════
 
 def rank_normalize(features, cols):
     """
-    Convert each feature to its within-group percentile rank (0.0 – 1.0).
-    This removes absolute scale differences between Slack (2000+ msg users)
-    and WhatsApp (max 197 msgs). The model learns relative position within
-    the group, not absolute counts.
+    Convert each feature to within-group percentile rank (0–1).
+    Removes absolute scale differences between datasets.
+    Celina's 197 messages → 1.0 (top of her 5-person group)
+    Joey's 2196 messages → 1.0 (top of 1639-person Slack group)
+    Both correctly identified as high-activity for their context.
     """
     out = features.copy()
     for col in cols:
-        vals       = out[col].values.astype(float)
-        ranks      = pd.Series(vals).rank(pct=True).values
-        out[col]   = ranks
+        vals     = out[col].values.astype(float)
+        out[col] = pd.Series(vals).rank(pct=True).values
     return out
 
 
@@ -138,10 +148,6 @@ def rank_normalize(features, cols):
 # ════════════════════════════════════════════════════════════════════════
 
 def assign_archetype_rules(features):
-    """
-    Percentile-based rules. Works correctly on any group size because
-    features are compared within the group, not against absolute thresholds.
-    """
     def pct(col, p): return features[col].quantile(p)
 
     def assign(row):
@@ -179,18 +185,17 @@ def assign_archetype_rules(features):
         }
         return max(scores, key=scores.get), scores
 
-    results  = features.apply(lambda r: assign(r), axis=1)
-    labels   = results.apply(lambda x: x[0])
-    all_scores = results.apply(lambda x: x[1])
-    return labels, all_scores
+    results = features.apply(lambda r: assign(r), axis=1)
+    labels  = results.apply(lambda x: x[0])
+    scores  = results.apply(lambda x: x[1])
+    return labels, scores
 
 
 # ════════════════════════════════════════════════════════════════════════
-# ARCHETYPE DIMENSION SCORES (0–100 for dashboard radar charts)
+# ARCHETYPE DIMENSION SCORES (0-100 for dashboard)
 # ════════════════════════════════════════════════════════════════════════
 
 def compute_archetype_scores(features):
-    """Normalized 0-100 scores computed within the group."""
     def norm(val, col):
         mn = features[col].min()
         mx = features[col].max()
@@ -220,43 +225,69 @@ def compute_archetype_scores(features):
 # MAIN PIPELINE
 # ════════════════════════════════════════════════════════════════════════
 
-print("\n🐝  COIN Hybrid Archetype Classifier  (rank-normalized)")
-print("=" * 55)
+print("\n🐝  COIN Hybrid Archetype Classifier — Multi-Dataset Training")
+print("=" * 60)
 
-# ── STEP 1: Extract raw features ─────────────────────────────────────────
-slack_raw = extract_features("slack_clean.json",     "Slack Developer Chat")
-wa_raw    = extract_features("whatsapp_clean.json",  "WhatsApp Team Chat")
+# ── STEP 1: Extract features from all three datasets ─────────────────────
+slack_raw    = extract_features("slack_clean.json",    "Slack Developer Chat (Chatterjee 2020)")
+nankani_raw  = extract_features("nankani_clean.json",  "CODERS WhatsApp — TSEC Mumbai (Nankani 2020)")
+wa_raw       = extract_features("whatsapp_clean.json", "Your Team WhatsApp")
 
 # ── STEP 2: Rank-normalize WITHIN each dataset ───────────────────────────
 print("\n📐  Rank-normalizing features within each dataset...")
-slack_norm = rank_normalize(slack_raw,  FEATURE_COLS)
-wa_norm    = rank_normalize(wa_raw,     FEATURE_COLS)
-print("  Done — each feature is now a within-group percentile rank (0–1)")
+slack_norm   = rank_normalize(slack_raw,   FEATURE_COLS)
+nankani_norm = rank_normalize(nankani_raw, FEATURE_COLS)
+wa_norm      = rank_normalize(wa_raw,      FEATURE_COLS)
+print("  ✅ Each feature = within-group percentile rank (0–1)")
 
-# ── STEP 3: Rule-based labels on RANK-NORMALIZED Slack data ──────────────
-print("\n📋  Applying COIN rules to Slack data (normalized)...")
-slack_norm['archetype'], slack_rule_scores = assign_archetype_rules(slack_norm)
+# ── STEP 3: Rule-based COIN labels on both training datasets ─────────────
+print("\n📋  Applying COIN rules to training datasets...")
+slack_norm['archetype'],   slack_rule_scores   = assign_archetype_rules(slack_norm)
+nankani_norm['archetype'], nankani_rule_scores = assign_archetype_rules(nankani_norm)
 
-dist = slack_norm['archetype'].value_counts()
-print("\n  Slack archetype distribution (training labels):")
-for arch, count in dist.items():
-    bar = '█' * int(count / len(slack_norm) * 40)
-    print(f"    {arch:<20} {count:>5}  ({count/len(slack_norm)*100:.1f}%)  {bar}")
+print("\n  Slack archetype distribution:")
+slack_dist = slack_norm['archetype'].value_counts()
+for arch, count in slack_dist.items():
+    print(f"    {arch:<20} {count:>5}  ({count/len(slack_norm)*100:.1f}%)")
 
-# ── STEP 4: Train Random Forest on normalized Slack features ──────────────
-print("\n🤖  Training Random Forest on normalized Slack data...")
+print("\n  Nankani 2020 archetype distribution:")
+nankani_dist = nankani_norm['archetype'].value_counts()
+for arch, count in nankani_dist.items():
+    print(f"    {arch:<20} {count:>5}  ({count/len(nankani_norm)*100:.1f}%)")
+
+# ── STEP 4: Combine training datasets ────────────────────────────────────
+print("\n🔗  Combining Slack + Nankani 2020 training data...")
+slack_norm['dataset']   = 'slack'
+nankani_norm['dataset'] = 'nankani'
+
+combined = pd.concat([
+    slack_norm[FEATURE_COLS + ['archetype', 'dataset']],
+    nankani_norm[FEATURE_COLS + ['archetype', 'dataset']]
+], ignore_index=True)
+
+print(f"  Combined training users: {len(combined):,}")
+print(f"    Slack:    {len(slack_norm):,} users")
+print(f"    Nankani:  {len(nankani_norm):,} users")
+print(f"\n  Combined archetype distribution:")
+combined_dist = combined['archetype'].value_counts()
+for arch, count in combined_dist.items():
+    bar = '█' * int(count / len(combined) * 40)
+    print(f"    {arch:<20} {count:>5}  ({count/len(combined)*100:.1f}%)  {bar}")
+
+# ── STEP 5: Train Random Forest on combined data ──────────────────────────
+print("\n🤖  Training Random Forest on combined dataset...")
 
 le = LabelEncoder()
-X  = slack_norm[FEATURE_COLS].values
-y  = le.fit_transform(slack_norm['archetype'])
+X  = combined[FEATURE_COLS].values
+y  = le.fit_transform(combined['archetype'])
 
 cv     = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 rf_cv  = RandomForestClassifier(
     n_estimators=300, max_depth=12,
     min_samples_leaf=3, class_weight='balanced', random_state=42
 )
-scores = cross_val_score(rf_cv, X, y, cv=cv, scoring='f1_macro')
-print(f"  Cross-validation F1 (5-fold): {scores.mean():.3f} ± {scores.std():.3f}")
+cv_scores = cross_val_score(rf_cv, X, y, cv=cv, scoring='f1_macro')
+print(f"  Cross-validation F1 (5-fold): {cv_scores.mean():.3f} ± {cv_scores.std():.3f}")
 
 rf = RandomForestClassifier(
     n_estimators=300, max_depth=12,
@@ -273,8 +304,8 @@ for feat, imp in importances[:6]:
     bar = '█' * int(imp * 60)
     print(f"    {feat:<28} {imp:.3f}  {bar}")
 
-# ── STEP 5: Rule-based labels on WhatsApp (using raw, within-group) ───────
-print("\n📋  Applying COIN rules to WhatsApp data (within-group)...")
+# ── STEP 6: Rule-based labels on WhatsApp ────────────────────────────────
+print("\n📋  Applying COIN rules to WhatsApp team (within-group)...")
 wa_rule_labels, wa_rule_scores = assign_archetype_rules(wa_raw)
 wa_raw['archetype_rule'] = wa_rule_labels
 
@@ -282,7 +313,7 @@ print("\n  Rule-based predictions:")
 for _, row in wa_raw.sort_values('msg_count', ascending=False).iterrows():
     print(f"    {row['author']:<12} → {row['archetype_rule']}")
 
-# ── STEP 6: ML predictions on normalized WhatsApp features ────────────────
+# ── STEP 7: ML predictions on normalized WhatsApp ────────────────────────
 print("\n🔮  ML predictions on WhatsApp (rank-normalized)...")
 X_wa        = wa_norm[FEATURE_COLS].values
 y_pred      = rf.predict(X_wa)
@@ -296,92 +327,87 @@ for _, row in wa_raw.sort_values('msg_count', ascending=False).iterrows():
     print(f"    {row['author']:<12} → {row['archetype_ml']}  "
           f"(conf: {row['ml_confidence']:.0f}%)")
 
-# ── STEP 7: HYBRID VOTING — combine rule + ML ─────────────────────────────
-print("\n🗳️   Hybrid voting (Rule 50% + ML 50%)...")
+# ── STEP 8: Hybrid voting (50% ML + 50% Rules) ───────────────────────────
+print("\n🗳️   Hybrid voting (50% ML + 50% Rules)...")
 
 archetype_order = ['🐝 Bee', '🐜 Ant', '🦋 Butterfly', '🦫 Capybara', '🔴 Leech']
 
-def hybrid_vote(row, rule_scores_series, ml_probs, le):
-    """
-    For small groups (< 20 people): weight rules and ML equally.
-    Rule scores are normalized to 0-1, then averaged with ML probabilities.
-    """
-    # ML probabilities (already 0-1)
-    ml_prob_dict = dict(zip(le.classes_, ml_probs))
+def hybrid_vote(rule_scores_dict, ml_probs, le):
+    ml_prob_dict   = dict(zip(le.classes_, ml_probs))
+    rule_total     = sum(rule_scores_dict.values())
+    rule_prob_dict = ({k: v / rule_total for k, v in rule_scores_dict.items()}
+                     if rule_total > 0 else {k: 0.2 for k in rule_scores_dict})
+    hybrid = {
+        arch: 0.50 * ml_prob_dict.get(arch, 0) + 0.50 * rule_prob_dict.get(arch, 0)
+        for arch in archetype_order
+    }
+    winner = max(hybrid, key=hybrid.get)
+    return winner, round(hybrid[winner] * 100, 1)
 
-    # Rule scores (raw integer scores, normalize to 0-1)
-    rule_score_dict = rule_scores_series
-    rule_total = sum(rule_score_dict.values())
-    if rule_total > 0:
-        rule_prob_dict = {k: v / rule_total for k, v in rule_score_dict.items()}
-    else:
-        rule_prob_dict = {k: 0.2 for k in rule_score_dict}
-
-    # Hybrid: 50% ML + 50% rules
-    hybrid = {}
-    for arch in archetype_order:
-        ml_p   = ml_prob_dict.get(arch, 0)
-        rule_p = rule_prob_dict.get(arch, 0)
-        hybrid[arch] = 0.50 * ml_p + 0.50 * rule_p
-
-    winner     = max(hybrid, key=hybrid.get)
-    confidence = round(hybrid[winner] * 100, 1)
-    return winner, confidence, hybrid
-
-wa_final_archetypes = []
+wa_final_archetypes  = []
 wa_final_confidences = []
-wa_final_hybrids = []
 
 for i, (_, row) in enumerate(wa_raw.iterrows()):
-    idx        = wa_raw.index.get_loc(row.name)
-    rule_sc    = wa_rule_scores.iloc[idx]
-    ml_probs_i = y_pred_prob[idx]
-    winner, conf, hybrid = hybrid_vote(row, rule_sc, ml_probs_i, le)
+    idx    = wa_raw.index.get_loc(row.name)
+    rule_sc = wa_rule_scores.iloc[idx]
+    winner, conf = hybrid_vote(rule_sc, y_pred_prob[idx], le)
     wa_final_archetypes.append(winner)
     wa_final_confidences.append(conf)
-    wa_final_hybrids.append(hybrid)
 
-wa_raw['archetype']    = wa_final_archetypes
-wa_raw['confidence']   = wa_final_confidences
+wa_raw['archetype']  = wa_final_archetypes
+wa_raw['confidence'] = wa_final_confidences
 
-# ── STEP 8: Compute dimension scores ─────────────────────────────────────
+# ── STEP 9: Archetype dimension scores ───────────────────────────────────
 scores_df  = compute_archetype_scores(wa_raw)
 wa_results = pd.concat([wa_raw, scores_df], axis=1)
 
-# Also add raw feature columns back for dashboard
+# Ensure all columns dashboard needs are present
 for col in ['avg_reply_speed_mins', 'question_ratio', 'task_focus_score']:
     if col not in wa_results.columns:
         wa_results[col] = 0
 
+# ── STEP 10: Save all outputs ─────────────────────────────────────────────
 wa_results.to_json("wa_results.json", orient="records", lines=True)
 
-# Save Slack results too
-slack_scores  = compute_archetype_scores(slack_raw)
-slack_results = pd.concat([slack_raw, slack_norm[FEATURE_COLS].add_suffix('_norm'),
-                            slack_scores], axis=1)
-slack_results.to_json("slack_results.json", orient="records", lines=True)
+# Save combined training reference
+combined_scores = compute_archetype_scores(
+    pd.concat([slack_raw[FEATURE_COLS + ['author']].assign(dataset='slack'),
+               nankani_raw[FEATURE_COLS + ['author']].assign(dataset='nankani')],
+              ignore_index=True)
+)
+combined_full = pd.concat([
+    slack_raw[FEATURE_COLS + ['author']].assign(
+        archetype=slack_norm['archetype'].values, dataset='slack'),
+    nankani_raw[FEATURE_COLS + ['author']].assign(
+        archetype=nankani_norm['archetype'].values, dataset='nankani')
+], ignore_index=True)
+combined_full.to_json("training_results.json", orient="records", lines=True)
 
-# ── STEP 9: Final summary ─────────────────────────────────────────────────
-print("\n" + "=" * 60)
-print("  ✅  FINAL RESULTS — Your WhatsApp Team (Hybrid Model)")
-print("=" * 60)
-print(f"  {'Name':<12} {'Hybrid':<20} {'Rule':<20} {'ML':<20} {'Conf':>5}")
-print(f"  {'-'*12} {'-'*20} {'-'*20} {'-'*20} {'-'*5}")
+# ── STEP 11: Final summary ────────────────────────────────────────────────
+print("\n" + "=" * 65)
+print("  ✅  FINAL RESULTS — Your WhatsApp Team (Multi-Dataset Hybrid)")
+print("=" * 65)
+print(f"  {'Name':<12} {'Hybrid':<22} {'Rule':<22} {'ML':<22} {'Conf':>5}")
+print(f"  {'-'*12} {'-'*22} {'-'*22} {'-'*22} {'-'*5}")
 
 for _, row in wa_results.sort_values('msg_count', ascending=False).iterrows():
     match = "✅" if row['archetype_rule'] == row['archetype_ml'] else "〰️"
     print(
         f"  {row['author']:<12} "
-        f"{row['archetype']:<20} "
-        f"{row['archetype_rule']:<20} "
-        f"{row['archetype_ml']:<20} "
+        f"{row['archetype']:<22} "
+        f"{row['archetype_rule']:<22} "
+        f"{row['archetype_ml']:<22} "
         f"{match} {row['confidence']:.0f}%"
     )
 
-print(f"\n  Final distribution:")
+print(f"\n  Final archetype distribution:")
 for arch, count in wa_results['archetype'].value_counts().items():
     print(f"    {arch}  →  {count} member{'s' if count > 1 else ''}")
 
-print("\n  ✅  Saved → wa_results.json")
-print("  ✅  Saved → slack_results.json")
-print("\n  Run:  streamlit run dashboard.py")
+print(f"\n  Training summary:")
+print(f"    Datasets used:     Slack (Chatterjee 2020) + Nankani 2020")
+print(f"    Training users:    {len(combined):,} ({len(slack_norm):,} Slack + {len(nankani_norm):,} Nankani)")
+print(f"    CV F1 score:       {cv_scores.mean():.3f} ± {cv_scores.std():.3f}")
+print(f"\n  ✅  Saved → wa_results.json")
+print(f"  ✅  Saved → training_results.json")
+print(f"\n  Run:  streamlit run dashboard.py")
