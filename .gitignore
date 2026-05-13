@@ -1,8 +1,29 @@
+# Large data files
 database.sqlite
 *.sqlite
-*.db
+slack_data/
+slack_clean.json
+slack_results.json
+reddit_raw.*
+reddit_clean.json
+reddit_raw.csv
+
+# Private chat data — never commit this
+whatsapp_chat.txt
+whatsapp_clean.json
+whatsapp_results.json
+wa_features.json
+wa_results.json
+
+# Python
 __pycache__/
-.DS_Store
 *.pyc
+*.pyo
+.DS_Store
 .idea/
+*.ipynb_checkpoints/
+
+# Virtual environment
 SNA/
+venv/
+env/
